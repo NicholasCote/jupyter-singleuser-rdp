@@ -1,6 +1,6 @@
-# Dockerfile for base image of all pangeo images
+# The instructions for this image were put together with heavy influence from the Jupyter Docker stack and Pangeo base images. 
+# Containerfile for base of all CISL Cloud images
 FROM ubuntu:22.04
-# build file for pangeo images
 
 # Fix: https://github.com/hadolint/hadolint/wiki/DL4006
 # Fix: https://github.com/koalaman/shellcheck/wiki/SC3014
@@ -22,6 +22,7 @@ ENV CONDA_ENV=cisl-cloud-base \
     LC_ALL=C.UTF-8 \
     # Install conda in the same place repo2docker does
     CONDA_DIR=/srv/conda \
+    # Set a directory for the default conda envs to allow for nc_conda_kernels env filtering
     CONDA_USR_DIR=/srv/base-conda 
 
 # All env vars that reference other env vars need to be in their own ENV block
@@ -41,6 +42,7 @@ ENV PATH=${CONDA_DIR}/bin:${NB_PYTHON_PREFIX}/bin:${PATH}
 # to ${CONDA_DIR}/etc but not to /etc
 ENV DASK_ROOT_CONFIG=${CONDA_USR_DIR}/etc
 
+# Copy in a file that contains all apt packages to install in the image
 COPY packages/apt.txt apt.txt
 
 # Install apt packages
@@ -56,13 +58,8 @@ RUN echo "Installing Apt-get packages..." \
 ###
 COPY scripts/fix-permissions /usr/local/bin/fix-permissions
 
+# Change permissions on the script so it can be run
 RUN chmod a+rx /usr/local/bin/fix-permissions
-
-# Enable prompt color in the skeleton .bashrc before creating the default NB_USER
-# hadolint ignore=SC2016
-RUN sed -i 's/^#force_color_prompt=yes/force_color_prompt=yes/' /etc/skel/.bashrc
-    # More information in: https://github.com/jupyter/docker-stacks/pull/2047
-    # and docs: https://docs.conda.io/projects/conda/en/latest/dev-guide/deep-dives/activation.html
 
 # Create NB_USER with name jovyan user with UID=1000 and in the 'users' group
 # and make sure these dirs are writable by the `users` group.
@@ -74,11 +71,9 @@ RUN echo "Creating ${NB_USER} user..." \
     # Make sure that /srv is owned by non-root user, so we can install things there
     && chown -R ${NB_USER}:${NB_USER} /srv
 
+# Create the directories where conda environments are going to be installed
 RUN mkdir -p "${CONDA_DIR}" && \
     mkdir -p "${CONDA_USR_DIR}" && \
-    #chown "${NB_USER}:${NB_UID}" "${CONDA_DIR}" && \
-    #chown "${NB_USER}:${NB_UID}" "${CONDA_USR_DIR}" && \
-    #chmod g+w /etc/passwd && \
     fix-permissions "${CONDA_DIR}" && \
     fix-permissions "${CONDA_USR_DIR}" && \
     fix-permissions "/home/${NB_USER}"
@@ -105,14 +100,19 @@ RUN echo "Installing Mambaforge..." \
     && fix-permissions "${CONDA_USR_DIR}" \
     && fix-permissions "/home/${NB_USER}"
 
+# Change to /tmp to work out
 WORKDIR /tmp
 
+# Copy pip and conda packages in to tmp
 COPY packages/requirements.txt packages/cisl-cloud-base.yml /tmp/
 
+# Install pip packages
 RUN ${CONDA_DIR}/bin/pip install --no-cache -r requirements.txt
 
+# Copy the condarc file over to define conda congiruation
 COPY --chown="${NB_UID}:${NB_GID}" configs/.condarc "${CONDA_DIR}/.condarc"
 
+# Create the conda envs with mamba to increase installation speed
 RUN mamba env create --name ${CONDA_ENV} -f cisl-cloud-base.yml \
     && mamba clean -afy \
     # Fix permissions
@@ -126,9 +126,13 @@ RUN mamba env create --name ${CONDA_ENV} -f cisl-cloud-base.yml \
 # bin to PATH earlier ($NB_PYTHON_PREFIX/bin)
 RUN echo ". ${CONDA_DIR}/etc/profile.d/conda.sh ; conda activate ${CONDA_ENV}" > /etc/profile.d/init_conda.sh
 
+# Copy the jupyter configuration
 COPY configs/jupyter_server_config.py /etc/jupyter/jupyter_server_config.py
 # Used to allow user deletions of folders and contents
 RUN sed -i 's/c.FileContentsManager.delete_to_trash = False/c.FileContentsManager.always_delete_dir = True/g' /etc/jupyter/jupyter_server_config.py
+
+# Copy default bashrc
+COPY configs/.bashrc /etc/bash.bashrc
 
 # Make the conda environments we install read only and executable for the user
 # They can run the environments but will get permission denied when trying to make changes
@@ -136,10 +140,19 @@ RUN sed -i 's/c.FileContentsManager.delete_to_trash = False/c.FileContentsManage
 RUN chmod 755 /srv/base-conda/cisl-cloud-base/* && \
     chown root:root /srv/*   
 
+# Cleanup files that were already installed
+RUN rm -rf /tmp/cisl-cloud-base.yml && \
+    rm -rf /tmp/requirements.txt
+
+# Set the default user to jovyan and make home /hom/jovyan
 USER ${NB_USER}
 WORKDIR ${HOME}
 
+# Copy over the start script with the correct permissions assigned
 COPY --chmod=755 /scripts/start /srv/start
 
+# Expose the port Jupyter runs on
 EXPOSE 8888
+
+# The Entrypoint is the /srv/start script
 ENTRYPOINT ["/srv/start"]
